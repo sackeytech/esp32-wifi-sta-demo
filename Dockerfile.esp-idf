@@ -1,0 +1,270 @@
+# Settings
+ARG DEBIAN_VERSION=stable-20241223-slim
+ARG PASSWORD="espidf"
+ARG MOSQUITTO_USERNAME="iot"
+ARG MOSQUITTO_PASSWORD="mosquitto"
+ARG IDF_VERSION=5.4.1
+ARG MOSQUITTO_VERSION=2.0.20
+ARG VS_CODE_SERVER_VERSION=4.93.1
+ARG VS_CODE_SERVER_PORT=8800
+ARG VS_CODE_EXT_CPPTOOLS_VERSION=1.22.10
+ARG VS_CODE_EXT_HEX_EDITOR_VERSION=1.11.1
+ARG VS_CODE_EXT_CMAKETOOLS_VERSION=1.19.52
+
+#-------------------------------------------------------------------------------
+# Base Image and Dependencies
+
+# Use Debian as the base image
+FROM debian:${DEBIAN_VERSION}
+
+# Redeclare arguments after FROM
+ARG TARGETARCH
+ARG HOSTNAME
+ARG PASSWORD
+ARG MOSQUITTO_USERNAME
+ARG MOSQUITTO_PASSWORD
+ARG IDF_VERSION
+ARG MOSQUITTO_VERSION
+ARG VS_CODE_SERVER_VERSION
+ARG VS_CODE_SERVER_PORT
+ARG VS_CODE_EXT_CPPTOOLS_VERSION
+ARG VS_CODE_EXT_HEX_EDITOR_VERSION
+ARG VS_CODE_EXT_CMAKETOOLS_VERSION
+
+# Set default shell during Docker image build to bash
+SHELL ["/bin/bash", "-c"]
+
+# Check if the target architecture is either x86_64 (amd64) or arm64 (aarch64)
+RUN if [ "$TARGETARCH" = "amd64" ] || [ "$TARGETARCH" = "arm64" ]; then \
+        echo "Architecture $TARGETARCH is supported."; \
+    else \
+        echo "Unsupported architecture: $TARGETARCH"; \
+        exit 1; \
+    fi
+
+# Set non-interactive frontend for apt-get to skip any user confirmations
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install base packages
+RUN apt-get -y update && \
+	apt-get install --no-install-recommends -y \
+    dos2unix \
+    wget \
+    curl \
+    git \
+    net-tools \
+    iputils-ping \
+    openssh-server \
+    locales \
+    python3 \
+    python3-pip \
+    python3-venv \
+    xz-utils \
+    dos2unix \
+    vim \
+    nano \
+    flex \
+    bison \
+    gperf \
+    cmake \
+    build-essential \
+    ninja-build \
+    ccache \
+    libffi-dev \
+    libgcrypt20 \
+    libglib2.0-0 \
+    libpixman-1-0 \
+    libsdl2-2.0-0 \
+    libslirp0 \
+    libssl-dev \
+    libusb-1.0-0 \
+    mosquitto \
+    mosquitto-clients
+
+# Set root password
+RUN echo "root:${PASSWORD}" | chpasswd
+
+# Clean up stale packages
+RUN apt-get clean -y && \
+	apt-get autoremove --purge -y && \
+	rm -rf /var/lib/apt/lists/*
+
+# Set up directories
+RUN mkdir -p /workspace/.vscode && \
+    mkdir -p /opt/toolchains
+
+# Copy workspace configuration
+COPY scripts/esp-idf/esp-idf.code-workspace /esp-idf.code-workspace
+
+# Set up sshd working directory
+RUN mkdir -p /var/run/sshd && \
+    chmod 0755 /var/run/sshd
+
+# Allow root login via SSH
+RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+
+# Expose SSH port
+EXPOSE 22
+
+#-------------------------------------------------------------------------------
+# ESP-IDF
+
+# Set ESP-IDF environment variables
+ENV IDF_VERSION=${IDF_VERSION}
+ENV IDF_TOOLS_PATH=/opt/toolchains/espressif
+
+# Download and install ESP-IDF
+RUN cd /opt/toolchains && \
+    git clone --recursive --branch v${IDF_VERSION} --depth 1 https://github.com/espressif/esp-idf.git && \
+    cd esp-idf && \
+    ./install.sh all
+
+# Temporarily run ESP-IDF environment to get compiler path (for IntelliSense)
+RUN bash && \
+    . /opt/toolchains/esp-idf/export.sh && \
+    echo "IDF_COMPILER_PATH=$(whereis xtensa-esp-elf-gcc | awk '{print $2}')" >> /etc/environment && \
+    exit
+
+# Copy C/C++ IntelliSense configuration
+RUN mkdir -p /opt/toolchains/esp-idf/.vscode
+COPY scripts/esp-idf/c_cpp_properties.json /c_cpp_properties.json
+
+# Install QEMU (Espressif fork)
+RUN python3 /opt/toolchains/esp-idf/tools/idf_tools.py install qemu-xtensa qemu-riscv32
+
+#-------------------------------------------------------------------------------
+# VS Code Server
+
+# Set VS Code Server environment variables
+ENV VS_CODE_SERVER_VERSION=${VS_CODE_SERVER_VERSION}
+ENV VS_CODE_SERVER_PORT=${VS_CODE_SERVER_PORT}
+
+# Install VS Code Server
+RUN cd /tmp && \
+    wget ${WGET_ARGS} https://code-server.dev/install.sh && \
+    chmod +x install.sh && \
+    bash install.sh --version ${VS_CODE_SERVER_VERSION}
+
+# Download VS Code extensions (code-server extension manager does not work well)
+RUN cd /tmp && \
+    if [ "$TARGETARCH" = "amd64" ]; then \
+        wget ${WGET_ARGS} https://github.com/microsoft/vscode-cpptools/releases/download/v${VS_CODE_EXT_CPPTOOLS_VERSION}/cpptools-linux-x64.vsix -O cpptools.vsix; \
+    elif [ "$TARGETARCH" = "arm64" ]; then \
+        wget ${WGET_ARGS} https://github.com/microsoft/vscode-cpptools/releases/download/v${VS_CODE_EXT_CPPTOOLS_VERSION}/cpptools-linux-arm64.vsix -O cpptools.vsix; \
+    else \
+        echo "Unsupported architecture"; \
+        exit 1; \
+    fi && \
+    wget ${WGET_ARGS} https://github.com/microsoft/vscode-cmake-tools/releases/download/v${VS_CODE_EXT_CMAKETOOLS_VERSION}/cmake-tools.vsix -O cmake-tools.vsix && \
+    wget --compression=gzip ${WGET_ARGS} https://marketplace.visualstudio.com/_apis/public/gallery/publishers/ms-vscode/vsextensions/hexeditor/${VS_CODE_EXT_HEX_EDITOR_VERSION}/vspackage -O hexeditor.vsix
+
+# Install extensions
+RUN cd /tmp && \
+    code-server --install-extension cpptools.vsix && \
+    code-server --install-extension cmake-tools.vsix && \
+    code-server --install-extension hexeditor.vsix
+
+# Clean up
+RUN cd /tmp && \
+    rm install.sh && \
+    rm cpptools.vsix && \
+    rm cmake-tools.vsix && \
+    rm hexeditor.vsix
+
+#-------------------------------------------------------------------------------
+# Mosquitto Configuration
+
+# Copy the Mosquitto configuration file
+COPY scripts/esp-idf/mosquitto.conf /etc/mosquitto/mosquitto.conf
+
+# Generate the password file with default username and password
+COPY scripts/esp-idf/generate_mosquitto_password.sh /generate_mosquitto_password.sh
+RUN chmod +x /generate_mosquitto_password.sh && \
+    /bin/bash /generate_mosquitto_password.sh ${MOSQUITTO_USERNAME} ${MOSQUITTO_PASSWORD}
+
+# Configure PID file
+RUN mkdir -p /run/mosquitto && \
+    chown mosquitto:mosquitto /run/mosquitto && \
+    chmod 755 /run/mosquitto
+
+# Copy in OpenSSL configuration file
+RUN mkdir -p /etc/ssl/
+COPY scripts/esp-idf/openssl.cnf /etc/ssl/openssl.cnf
+
+RUN echo "HOSTNAME argument is: ${HOSTNAME}"
+
+# Add host's hostname to SAN list in OpenSSL configuration
+RUN echo "DNS.2 = ${HOSTNAME}.local" >> /etc/ssl/openssl.cnf
+
+# Copy in CA key and certificate (generated using Dockerfile.ca-gen)
+RUN mkdir -p /etc/mosquitto/ca_certificates
+COPY scripts/esp-idf/ca.crt /etc/mosquitto/ca_certificates/ca.crt
+COPY scripts/esp-idf/ca.key /etc/mosquitto/ca_certificates/ca.key
+
+# Set permissions for CA key and certificate
+RUN chown -R mosquitto:mosquitto /etc/mosquitto/ca_certificates && \
+    chmod 755 /etc/mosquitto/ca_certificates && \
+    chmod 644 /etc/mosquitto/ca_certificates/ca.crt && \
+    chmod 600 /etc/mosquitto/ca_certificates/ca.key
+
+# Generate Server Key and Certificate Signing Request (CSR)
+RUN openssl genrsa -out /etc/mosquitto/certs/server.key 4096 && \
+    openssl req \
+        -new \
+        -key /etc/mosquitto/certs/server.key \
+        -out /etc/mosquitto/certs/server.csr \
+        -config /etc/ssl/openssl.cnf
+
+# Generate Server Certificate (expires in 100 years)
+RUN openssl x509 \
+        -req \
+        -CAcreateserial \
+        -days 36500 \
+        -in /etc/mosquitto/certs/server.csr \
+        -CA /etc/mosquitto/ca_certificates/ca.crt \
+        -CAkey /etc/mosquitto/ca_certificates/ca.key \
+        -out /etc/mosquitto/certs/server.crt \
+        -extensions req_ext \
+        -extfile /etc/ssl/openssl.cnf
+
+# Set permissions for server key and certificate
+RUN chown -R mosquitto:mosquitto /etc/mosquitto/certs && \
+    chmod 755 /etc/mosquitto/certs && \
+    chmod 644 /etc/mosquitto/certs/server.crt && \
+    chmod 600 /etc/mosquitto/certs/server.key
+
+#-------------------------------------------------------------------------------
+# Optional Settings
+
+# Initialise system locale (required by menuconfig)
+RUN sed -i '/^#.*en_US.UTF-8/s/^#//' /etc/locale.gen && \
+    locale-gen en_US.UTF-8 && \
+    update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+
+#-------------------------------------------------------------------------------
+# Entrypoint
+
+# Export environment variables to be system-wide
+RUN echo "IDF_TOOLS_PATH=${IDF_TOOLS_PATH}" >> /etc/environment && \
+    echo "IDF_VERSION=${IDF_VERSION}" >> /etc/environment
+
+# Copy VS Code settings to ESP-IDF workspace so we don't get submodule warnings
+COPY scripts/esp-idf/settings.json /opt/toolchains/esp-idf/.vscode/settings.json
+
+# Add alias to bashrc and enable environment on terminal open
+RUN echo "alias get_idf='. /opt/toolchains/esp-idf/export.sh'" >> /root/.bashrc && \
+    echo ". /opt/toolchains/esp-idf/export.sh" >> /root/.bashrc
+
+# Add paths to C and C++ compilers (for IntelliSense)
+RUN /bin/bash -c "source /opt/toolchains/esp-idf/export.sh && \
+    XTENSA_C_COMPILER_PATH=\$(whereis -b xtensa-esp-elf-gcc | cut -d ' ' -f2) && \
+    XTENSA_CPP_COMPILER_PATH=\$(whereis -b xtensa-esp-elf-g++ | cut -d ' ' -f2) && \
+    echo \"export XTENSA_C_COMPILER_PATH=\$XTENSA_C_COMPILER_PATH\" >> /root/.bashrc && \
+    echo \"export XTENSA_CPP_COMPILER_PATH=\$XTENSA_CPP_COMPILER_PATH\" >> /root/.bashrc"
+    
+# Custom entrypoint
+COPY scripts/esp-idf/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh && \
+    dos2unix /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]

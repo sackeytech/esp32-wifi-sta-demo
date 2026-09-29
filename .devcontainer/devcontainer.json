@@ -1,0 +1,20 @@
+{
+    "name": "ESP-IDF Development Environment",
+    "image": "env-esp-idf",
+    "runArgs": [
+        "--privileged",
+        "-v", "/dev:/dev"
+    ],
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-vscode.cpptools",
+                "ms-vscode.cmake-tools",
+                "ms-vscode.hexeditor"
+            ]
+        }
+    },
+    "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+    "workspaceFolder": "/workspace",
+    "remoteUser": "root"
+}

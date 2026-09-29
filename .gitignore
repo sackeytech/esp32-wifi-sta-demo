@@ -1,0 +1,13 @@
+# Ignore build directories in all apps
+**/build/
+
+# Ignore generated sdkconfig files (contains Wi-Fi passwords)
+**/sdkconfig
+**/sdkconfig.old
+
+# Keep sdkconfig.defaults tracked
+!**/sdkconfig.defaults
+
+# Ignore any large Docker image tarballs if present
+*.tar
+*.tar.gz
